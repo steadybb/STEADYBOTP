@@ -1,0 +1,17 @@
+aiohttp
+celery
+cryptography
+dnspython
+Flask
+Flask-Cors
+Flask-Limiter
+python-dotenv
+python-telegram-bot
+PySocks
+phonenumbers
+redis
+requests
+SQLAlchemy
+stem
+vonage
+websocket-client
