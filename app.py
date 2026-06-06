@@ -148,16 +148,57 @@ ENCRYPTION_KEY_FILE = os.getenv("ENCRYPTION_KEY_FILE", "/run/secrets/encryption_
 if _missing_env:
     logger.warning("Missing environment variables (will continue; some features disabled):\n" + "\n".join(_missing_env))
 
-# Load encryption key
+# Load encryption key (must be 32 url-safe base64-encoded bytes)
 def load_encryption_key():
-    if os.path.exists(ENCRYPTION_KEY_FILE):
-        with open(ENCRYPTION_KEY_FILE, "r") as f:
-            return f.read().strip()
-    key = os.getenv("ENCRYPTION_KEY") or Fernet.generate_key().decode()
-    with open(ENCRYPTION_KEY_FILE, "w") as f:
-        f.write(key)
-    os.chmod(ENCRYPTION_KEY_FILE, 0o600)
-    return key
+    def is_valid(k: str) -> bool:
+        try:
+            if isinstance(k, str):
+                k_b = k.encode()
+            else:
+                k_b = k
+            Fernet(k_b)
+            return True
+        except Exception:
+            return False
+
+    # 1) try env var
+    env_key = os.getenv("ENCRYPTION_KEY")
+    if env_key:
+        if is_valid(env_key):
+            return env_key
+        # allow user-friendly newline escapes
+        maybe = env_key.replace('\\n', '\n')
+        if is_valid(maybe):
+            return maybe
+
+    # 2) try file
+    try:
+        if os.path.exists(ENCRYPTION_KEY_FILE):
+            with open(ENCRYPTION_KEY_FILE, "r") as f:
+                file_key = f.read().strip()
+            if file_key and is_valid(file_key):
+                return file_key
+            # try unescaping
+            if file_key and is_valid(file_key.replace('\\n', '\n')):
+                return file_key.replace('\\n', '\n')
+    except Exception:
+        pass
+
+    # 3) generate a new valid key and persist
+    new_key = Fernet.generate_key().decode()
+    try:
+        with open(ENCRYPTION_KEY_FILE, "w") as f:
+            f.write(new_key)
+        try:
+            os.chmod(ENCRYPTION_KEY_FILE, 0o600)
+        except Exception:
+            # chmod may fail on Windows; ignore
+            pass
+    except Exception:
+        # if writing fails, just return the generated key
+        pass
+    return new_key
+
 
 ENCRYPTION_KEY = load_encryption_key()
 fernet = Fernet(ENCRYPTION_KEY.encode())
