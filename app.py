@@ -146,7 +146,7 @@ if not os.getenv("DATABASE_URL"):
 ENCRYPTION_KEY_FILE = os.getenv("ENCRYPTION_KEY_FILE", "/run/secrets/encryption_key")
 
 if _missing_env:
-    raise RuntimeError("Missing required environment variables:\n" + "\n".join(_missing_env))
+    logger.warning("Missing environment variables (will continue; some features disabled):\n" + "\n".join(_missing_env))
 
 # Load encryption key
 def load_encryption_key():
@@ -302,6 +302,17 @@ DEFAULT_CONFIG = {
     }
 }
 
+# Allow storing Vonage creds in config so the bot can be used to set them
+DEFAULT_VONAGE_KEYS = {
+    "VONAGE_API_KEY": "",
+    "VONAGE_API_SECRET": "",
+    "VONAGE_APPLICATION_ID": "",
+    "VONAGE_PRIVATE_KEY": "",
+    "VONAGE_VIRTUAL_NUMBER": "",
+}
+
+DEFAULT_CONFIG.update(DEFAULT_VONAGE_KEYS)
+
 class ConfigManager:
     def __init__(self, path):
         self.path = path
@@ -325,10 +336,60 @@ class ConfigManager:
             self.data[key] = value
             self.save()
     def validate(self):
-        return not any(os.getenv(k, "").startswith("YOUR_") for k in
-                       ["TELEGRAM_TOKEN", "VONAGE_API_KEY", "VONAGE_API_SECRET", "VONAGE_VIRTUAL_NUMBER"])
+        # Only require a valid Telegram token to run the bot; Vonage can be configured later via the bot
+        return not os.getenv("TELEGRAM_TOKEN", "").startswith("YOUR_")
 
 config = ConfigManager(CONFIG_FILE)
+
+# If Vonage env vars are not present, allow configuring them via config.json (edited through the bot)
+if not VONAGE_API_KEY:
+    VONAGE_API_KEY = config.get("VONAGE_API_KEY", "")
+    VONAGE_API_SECRET = config.get("VONAGE_API_SECRET", "")
+    VONAGE_APPLICATION_ID = config.get("VONAGE_APPLICATION_ID", "")
+    VONAGE_PRIVATE_KEY = config.get("VONAGE_PRIVATE_KEY", "").replace("\\n", "\n")
+    VONAGE_VIRTUAL_NUMBER = config.get("VONAGE_VIRTUAL_NUMBER", "")
+
+# Feature flags
+VONAGE_SMS_ENABLED = bool(VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_VIRTUAL_NUMBER)
+VONAGE_VOICE_ENABLED = bool(VONAGE_APPLICATION_ID and VONAGE_PRIVATE_KEY)
+logger.info(f"Vonage SMS enabled: {VONAGE_SMS_ENABLED}; Vonage Voice enabled: {VONAGE_VOICE_ENABLED}")
+
+
+def init_vonage_clients_from_config():
+    """Attempt to (re)initialize Vonage clients from current `config` values.
+    This allows entering credentials via the bot's config editor at runtime.
+    """
+    global VONAGE_API_KEY, VONAGE_API_SECRET, VONAGE_APPLICATION_ID, VONAGE_PRIVATE_KEY, VONAGE_VIRTUAL_NUMBER
+    global VONAGE_SMS_ENABLED, VONAGE_VOICE_ENABLED
+    global base_client, voice_client, sms_client, messages, voice
+
+    # reload from config if env not set
+    if not VONAGE_API_KEY:
+        VONAGE_API_KEY = config.get("VONAGE_API_KEY", "")
+        VONAGE_API_SECRET = config.get("VONAGE_API_SECRET", "")
+        VONAGE_APPLICATION_ID = config.get("VONAGE_APPLICATION_ID", "")
+        VONAGE_PRIVATE_KEY = config.get("VONAGE_PRIVATE_KEY", "").replace("\\n", "\n")
+        VONAGE_VIRTUAL_NUMBER = config.get("VONAGE_VIRTUAL_NUMBER", "")
+
+    VONAGE_SMS_ENABLED = bool(VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_VIRTUAL_NUMBER)
+    VONAGE_VOICE_ENABLED = bool(VONAGE_APPLICATION_ID and VONAGE_PRIVATE_KEY)
+
+    if VONAGE_SMS_ENABLED and not sms_client:
+        try:
+            base_client = Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET))
+            sms_client = base_client.sms
+            logger.info("Vonage SMS client initialized from config.")
+        except Exception as e:
+            logger.warning(f"Could not initialize Vonage SMS client from config: {e}")
+
+    if VONAGE_VOICE_ENABLED and not voice:
+        try:
+            voice_client = Vonage(Auth(application_id=VONAGE_APPLICATION_ID, private_key=VONAGE_PRIVATE_KEY))
+            messages = voice_client.messages
+            voice = voice_client.voice
+            logger.info("Vonage Voice client initialized from config.")
+        except Exception as e:
+            logger.warning(f"Could not initialize Vonage Voice client from config: {e}")
 
 # ======================== DATABASE ========================
 Base = declarative_base()
@@ -453,12 +514,26 @@ if TOR_PROXY and validate_tor(TOR_PROXY):
     os.environ["http_proxy"] = TOR_PROXY
     os.environ["https_proxy"] = TOR_PROXY
 
-# Vonage clients
-base_client = Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET))
-voice_client = Vonage(Auth(application_id=VONAGE_APPLICATION_ID, private_key=VONAGE_PRIVATE_KEY))
-sms_client = base_client.sms
-messages = voice_client.messages
-voice = voice_client.voice
+# Vonage clients (optional)
+base_client = None
+voice_client = None
+sms_client = None
+messages = None
+voice = None
+if VONAGE_SMS_ENABLED:
+    try:
+        base_client = Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET))
+        sms_client = base_client.sms
+    except Exception as e:
+        logger.warning(f"Failed to initialize Vonage SMS client: {e}")
+
+if VONAGE_VOICE_ENABLED:
+    try:
+        voice_client = Vonage(Auth(application_id=VONAGE_APPLICATION_ID, private_key=VONAGE_PRIVATE_KEY))
+        messages = voice_client.messages
+        voice = voice_client.voice
+    except Exception as e:
+        logger.warning(f"Failed to initialize Vonage Voice client: {e}")
 
 # ======================== CELERY ========================
 celery_app = Celery('godmode', broker=f'redis://{REDIS_HOST}:{REDIS_PORT}')
@@ -466,6 +541,11 @@ celery_app = Celery('godmode', broker=f'redis://{REDIS_HOST}:{REDIS_PORT}')
 @celery_app.task(bind=True, max_retries=3)
 def send_bulk_sms_task(self, message, contact_numbers):
     succ, fail = 0, 0
+    if not sms_client:
+        init_vonage_clients_from_config()
+        if not sms_client:
+            logger.warning("Bulk SMS requested but SMS client is not configured.")
+            return 0, len(contact_numbers)
     for num in contact_numbers:
         try:
             resp = sms_client.send({"to": num, "from_": SMS_FROM, "text": message})
@@ -489,7 +569,8 @@ def health_check_task():
     try:
         r.ping()
         db_session().execute("SELECT 1")
-        Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET)).account.get_balance()
+        if VONAGE_SMS_ENABLED or VONAGE_VOICE_ENABLED:
+            Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET)).account.get_balance()
         logger.info("Health check passed.")
     except Exception as e:
         logger.error(f"Health check failed: {e}. Restarting app.")
@@ -910,6 +991,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not v: await q.edit_message_text("Not found."); return MAIN
         msg = v["scripts"]["sms_message"].replace("{service}", v["spoof_service_name"])
         try:
+            if not sms_client:
+                init_vonage_clients_from_config()
+                if not sms_client:
+                    await q.edit_message_text("❌ SMS provider not configured. Set Vonage credentials via the config menu or .env.")
+                    return MAIN
             resp = sms_client.send({"to": v["phone"], "from_": SMS_FROM, "text": msg})
             if resp and resp.messages[0].status == "0":
                 await q.edit_message_text(f"✅ SMS sent to {v['name']}")
@@ -1175,6 +1261,11 @@ async def send_sms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2: await update.message.reply_text("/sendsms number text"); return
     num, text = context.args[0], " ".join(context.args[1:])
     try:
+        if not sms_client:
+            init_vonage_clients_from_config()
+            if not sms_client:
+                await update.message.reply_text("❌ SMS provider not configured. Set Vonage credentials via the config menu or .env.")
+                return
         resp = sms_client.send({"to": num, "from_": SMS_FROM, "text": text})
         if resp and resp.messages[0].status == "0": await update.message.reply_text("✅ SMS sent")
         else: await update.message.reply_text("❌ Failed")
@@ -1186,6 +1277,11 @@ async def bulk_sms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with db_session() as s:
         contacts = [fernet.decrypt(c.number).decode() for c in s.query(Contact).all()]
     if not contacts: await update.message.reply_text("No contacts."); return
+    if not sms_client:
+        init_vonage_clients_from_config()
+        if not sms_client:
+            await update.message.reply_text("❌ SMS provider not configured. Set Vonage credentials via the config menu or .env.")
+            return
     task = send_bulk_sms_task.delay(message, contacts)
     await update.message.reply_text(f"Bulk SMS task {task.id} queued.")
 
