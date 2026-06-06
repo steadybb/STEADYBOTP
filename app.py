@@ -41,8 +41,7 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 
-import vonage
-from vonage import Client, Sms, Voice, Messages
+from vonage import Auth, Vonage
 
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, LargeBinary, Text
 from sqlalchemy.ext.declarative import declarative_base
@@ -449,15 +448,17 @@ def rotate_tor_ip():
 proxies = {}
 if TOR_PROXY and validate_tor(TOR_PROXY):
     proxies = {"http": TOR_PROXY, "https": TOR_PROXY}
+    os.environ["HTTP_PROXY"] = TOR_PROXY
+    os.environ["HTTPS_PROXY"] = TOR_PROXY
+    os.environ["http_proxy"] = TOR_PROXY
+    os.environ["https_proxy"] = TOR_PROXY
 
 # Vonage clients
-base_client = Client(key=VONAGE_API_KEY, secret=VONAGE_API_SECRET)
-if proxies: base_client.session.proxies = proxies
-voice_client = Client(application_id=VONAGE_APPLICATION_ID, private_key=VONAGE_PRIVATE_KEY)
-if proxies: voice_client.session.proxies = proxies
-sms_client = Sms(base_client)
-messages = Messages(voice_client)
-voice = Voice(voice_client)
+base_client = Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET))
+voice_client = Vonage(Auth(application_id=VONAGE_APPLICATION_ID, private_key=VONAGE_PRIVATE_KEY))
+sms_client = base_client.sms
+messages = voice_client.messages
+voice = voice_client.voice
 
 # ======================== CELERY ========================
 celery_app = Celery('godmode', broker=f'redis://{REDIS_HOST}:{REDIS_PORT}')
@@ -467,8 +468,8 @@ def send_bulk_sms_task(self, message, contact_numbers):
     succ, fail = 0, 0
     for num in contact_numbers:
         try:
-            resp = sms_client.send_message({"from": SMS_FROM, "to": num, "text": message})
-            if resp and resp["messages"][0]["status"] == "0": succ += 1
+            resp = sms_client.send({"to": num, "from_": SMS_FROM, "text": message})
+            if resp and resp.messages[0].status == "0": succ += 1
             else: fail += 1; raise ValueError("SMS failed")
         except Exception as exc:
             fail += 1; self.retry(exc=exc, countdown=60*(self.request.retries+1))
@@ -488,7 +489,7 @@ def health_check_task():
     try:
         r.ping()
         db_session().execute("SELECT 1")
-        Client(key=VONAGE_API_KEY, secret=VONAGE_API_SECRET).get_balance()
+        Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET)).account.get_balance()
         logger.info("Health check passed.")
     except Exception as e:
         logger.error(f"Health check failed: {e}. Restarting app.")
@@ -909,8 +910,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not v: await q.edit_message_text("Not found."); return MAIN
         msg = v["scripts"]["sms_message"].replace("{service}", v["spoof_service_name"])
         try:
-            resp = sms_client.send_message({"from": SMS_FROM, "to": v["phone"], "text": msg})
-            if resp and resp["messages"][0]["status"] == "0":
+            resp = sms_client.send({"to": v["phone"], "from_": SMS_FROM, "text": msg})
+            if resp and resp.messages[0].status == "0":
                 await q.edit_message_text(f"✅ SMS sent to {v['name']}")
             else: await q.edit_message_text("❌ SMS failed.")
         except Exception as e: await q.edit_message_text(f"Error: {e}")
@@ -1174,8 +1175,8 @@ async def send_sms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2: await update.message.reply_text("/sendsms number text"); return
     num, text = context.args[0], " ".join(context.args[1:])
     try:
-        resp = sms_client.send_message({"from": SMS_FROM, "to": num, "text": text})
-        if resp and resp["messages"][0]["status"] == "0": await update.message.reply_text("✅ SMS sent")
+        resp = sms_client.send({"to": num, "from_": SMS_FROM, "text": text})
+        if resp and resp.messages[0].status == "0": await update.message.reply_text("✅ SMS sent")
         else: await update.message.reply_text("❌ Failed")
     except Exception as e: await update.message.reply_text(f"Error: {e}")
 
