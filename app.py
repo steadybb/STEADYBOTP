@@ -1442,7 +1442,7 @@ if __name__ == "__main__":
     # Build the application
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Conversation handler
+    # Conversation handler (your existing config)
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -1483,33 +1483,36 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("cancelconfig", cancel_config))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, config_value_receiver), group=1)
 
+    # Set global application for webhook
+    globals()['application'] = application
+
     logger.warning("🚀 God Mode OTP Capture Bot starting...")
     
     # Start keep-alive pinger if configured
     if KEEP_ALIVE_URL:
         threading.Thread(target=keep_alive_pinger, args=(KEEP_ALIVE_URL, KEEP_ALIVE_INTERVAL), daemon=True).start()
 
-    # Set global application for webhook
-    globals()['application'] = application
-
-    # Start Flask in a separate thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
+    # Choose mode based on webhook URL
     if TELEGRAM_WEBHOOK_URL:
-        # Webhook mode - set webhook and run polling (but polling is disabled)
-        try:
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=int(os.getenv("PORT", 8080)),
-                url_path=TELEGRAM_WEBHOOK_PATH,
-                webhook_url=TELEGRAM_WEBHOOK_URL,
-                secret_token=TELEGRAM_WEBHOOK_SECRET_TOKEN or None,
-                drop_pending_updates=True
-            )
-        except Exception as e:
-            logger.error(f"Failed to start webhook: {e}")
-            sys.exit(1)
+        # Webhook mode: Flask handles everything, Telegram uses webhook
+        logger.info(f"Starting in WEBHOOK mode on {TELEGRAM_WEBHOOK_URL}")
+        
+        # Set the webhook
+        import requests as req
+        webhook_set_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+        response = req.post(webhook_set_url, json={
+            "url": TELEGRAM_WEBHOOK_URL,
+            "secret_token": TELEGRAM_WEBHOOK_SECRET_TOKEN or None
+        })
+        if response.json().get("ok"):
+            logger.info("✅ Telegram webhook set successfully")
+        else:
+            logger.error(f"❌ Failed to set webhook: {response.json()}")
+        
+        # Run Flask (this blocks)
+        run_flask()
     else:
-        # Polling mode
+        # Polling mode: Run Flask in background, Telegram polls
+        logger.info("Starting in POLLING mode")
+        threading.Thread(target=run_flask, daemon=True).start()
         application.run_polling(drop_pending_updates=True)
