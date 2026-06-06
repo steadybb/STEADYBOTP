@@ -111,8 +111,27 @@ def print_startup_banner():
     print(banner)
     logger.info("🚀 God Mode OTP Capture Bot initialized (v4.1)")
     logger.info(f"📊 Database: {DATABASE_URL if not DATABASE_URL.startswith('sqlite') else 'SQLite (local)'}")
-    logger.info(f"🔐 Redis: {REDIS_HOST}:{REDIS_PORT}")
-    logger.info(f"📱 Telegram: Ready for commands")
+    logger.info(f"🔐 Redis: {REDIS_HOST}:{REDIS_PORT} {'SSL' if REDIS_SSL else 'TCP'}")
+    logger.info(f"🧭 Flask host: {os.getenv('HOST', '0.0.0.0')} port: {os.getenv('PORT', 5000)}")
+    logger.info(f"📡 Health route: /health | Dashboard: /dashboard | Root status: /")
+    logger.info(f"📱 Telegram: {'configured' if os.getenv('TELEGRAM_TOKEN') else 'missing'}")
+    logger.info(f"📞 Vonage SMS: {'enabled' if VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_VIRTUAL_NUMBER else 'disabled'}")
+    logger.info(f"🎙️ Vonage Voice: {'enabled' if VONAGE_APPLICATION_ID and VONAGE_PRIVATE_KEY else 'disabled'}")
+    logger.info(f"🛡️ Keep-alive pinger: {'enabled' if os.getenv('KEEP_ALIVE_URL') else 'disabled'}")
+
+# Detailed startup service status log
+# This prints the configured availability of each major plugin/integration.
+def log_service_status():
+    logger.info("=== Service status ===")
+    logger.info(f"Telegram: {'configured' if TELEGRAM_TOKEN else 'missing'}")
+    logger.info(f"Vonage SMS: {'enabled' if VONAGE_SMS_ENABLED else 'disabled'}")
+    logger.info(f"Vonage Voice: {'enabled' if VONAGE_VOICE_ENABLED else 'disabled'}")
+    logger.info(f"Vonage virtual number: {'set' if VONAGE_VIRTUAL_NUMBER else 'not set'}")
+    logger.info(f"Tor proxy: {'configured' if TOR_PROXY else 'none'}")
+    logger.info(f"Keep-alive URL: {KEEP_ALIVE_URL if KEEP_ALIVE_URL else 'none'}")
+    logger.info(f"Database URL: {DATABASE_URL}")
+    logger.info(f"Redis: {REDIS_HOST}:{REDIS_PORT} {'SSL' if REDIS_SSL else 'TCP'}")
+    logger.info("======================")
 
 _missing_env = []
 
@@ -1370,6 +1389,7 @@ def keep_alive_pinger(url: str, interval: int = 300):
 
 if __name__ == "__main__":
     print_startup_banner()
+    log_service_status()
     
     if not config.validate():
         logger.error("Invalid configuration. Exiting."); sys.exit(1)
