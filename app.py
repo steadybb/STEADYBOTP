@@ -41,7 +41,16 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 
-from vonage import Auth, Vonage
+# Optional Vonage import - will be loaded on demand
+try:
+    from vonage import Auth, Vonage
+    VONAGE_AVAILABLE = True
+except ImportError:
+    logger_temp = __import__('logging').getLogger(__name__)
+    logger_temp.warning("Vonage SDK not available. Vonage features will be disabled until configured.")
+    VONAGE_AVAILABLE = False
+    Auth = None
+    Vonage = None
 
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, LargeBinary, Text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -424,6 +433,10 @@ def init_vonage_clients_from_config():
     """Attempt to (re)initialize Vonage clients from current `config` values.
     This allows entering credentials via the bot's config editor at runtime.
     """
+    if not VONAGE_AVAILABLE:
+        logger.warning("Vonage SDK not available. Cannot initialize Vonage clients.")
+        return
+    
     global VONAGE_API_KEY, VONAGE_API_SECRET, VONAGE_APPLICATION_ID, VONAGE_PRIVATE_KEY, VONAGE_VIRTUAL_NUMBER
     global VONAGE_SMS_ENABLED, VONAGE_VOICE_ENABLED
     global base_client, voice_client, sms_client, messages, voice
@@ -585,14 +598,15 @@ voice_client = None
 sms_client = None
 messages = None
 voice = None
-if VONAGE_SMS_ENABLED:
+
+if VONAGE_AVAILABLE and VONAGE_SMS_ENABLED:
     try:
         base_client = Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET))
         sms_client = base_client.sms
     except Exception as e:
         logger.warning(f"Failed to initialize Vonage SMS client: {e}")
 
-if VONAGE_VOICE_ENABLED:
+if VONAGE_AVAILABLE and VONAGE_VOICE_ENABLED:
     try:
         voice_client = Vonage(Auth(application_id=VONAGE_APPLICATION_ID, private_key=VONAGE_PRIVATE_KEY))
         messages = voice_client.messages
@@ -634,7 +648,7 @@ def health_check_task():
     try:
         r.ping()
         db_session().execute("SELECT 1")
-        if VONAGE_SMS_ENABLED or VONAGE_VOICE_ENABLED:
+        if VONAGE_AVAILABLE and (VONAGE_SMS_ENABLED or VONAGE_VOICE_ENABLED):
             Vonage(Auth(api_key=VONAGE_API_KEY, api_secret=VONAGE_API_SECRET)).account.get_balance()
         logger.info("Health check passed.")
     except Exception as e:
